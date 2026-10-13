@@ -1,32 +1,63 @@
-name: Build Windows installer
+name: Build Windows EXE
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, master]
-  pull_request:
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Find HTML file
+        shell: pwsh
+        run: |
+          $html = Get-ChildItem -Recurse -Filter *.html | Where-Object { $_.FullName -notmatch 'node_modules|\.github' } | Select-Object -First 1
+          if (-not $html) { Write-Error "هیچ فایل html پیدا نشد"; exit 1 }
+          Write-Host "Found: $($html.FullName)"
+          echo "HTML_PATH=$($html.FullName)" >> $env:GITHUB_ENV
+
+      - name: Prepare Electron app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app | Out-Null
+          Copy-Item $env:HTML_PATH app/index.html
+          @'
+          const { app, BrowserWindow } = require('electron');
+          const path = require('path');
+          app.whenReady().then(() => {
+            const win = new BrowserWindow({ width: 1280, height: 720, autoHideMenuBar: true });
+            win.loadFile(path.join(__dirname, 'index.html'));
+          });
+          app.on('window-all-closed', () => app.quit());
+          '@ | Set-Content app/main.js
+          @'
+          {
+            "name": "aria-game",
+            "version": "1.0.0",
+            "main": "main.js",
+            "build": {
+              "appId": "com.ariagames.game",
+              "productName": "AriaGame",
+              "win": { "target": "portable" }
+            }
+          }
+          '@ | Set-Content app/package.json
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install and build
+        working-directory: app
+        shell: pwsh
+        run: |
+          npm install --save-dev electron@28 electron-builder@24
+          npx electron-builder --win portable --publish never
 
-      - name: Build Windows installer (NSIS)
-        run: npm run dist
-
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: BackroomsNoExit-Windows-Setup
-          path: dist/*.exe
-          if-no-files-found: error
+          name: windows-build
+          path: app/dist/*.exe
